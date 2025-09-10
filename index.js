@@ -1,85 +1,66 @@
+import crypto from "crypto";
 import dotenv from "dotenv";
 import express from "express";
 import fetch from "node-fetch";
-import jwt from "jsonwebtoken";
 import pino from "pino";
 
 dotenv.config();
 
 const app = express();
+
+app.use((req, res, next) => {
+  let data = [];
+  req.on("data", chunk => data.push(chunk));
+  req.on("end", () => {
+    req.rawBody = Buffer.concat(data);
+    try {
+      req.body = JSON.parse(req.rawBody.toString("utf8"));
+    } catch {
+      req.body = {};
+    }
+    next();
+  });
+});
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const LINE_TOKEN = process.env.LINE_TOKEN;
 const LINE_USER_ID = process.env.LINE_USER_ID;
-const SECRET = process.env.JWT_SECRET || "";
 
-const logger = pino()
+const logger = pino();
 
-// Middleware to verify JWT
-function verifyJwt(req, res, next) {
-  const token = req.headers["x-sonar-webhook-hmac-sha256"];
-  if (!token) {
-    logger.warn("Unauthorized: No token provided");
-    return res.status(401).send("Unauthorized: No token provided");
-  }
-  try {
-    const decoded = jwt.verify(token, SECRET);
-    req.jwtPayload = decoded;
-    next();
-  } catch (err) {
-    logger.warn("Unauthorized: " + err.message);
-    return res.status(401).send("Unauthorized: " + err.message);
-  }
+function isValidSignature(req) {
+  const receivedSignature = req.headers["x-sonar-webhook-hmac-sha256"];
+  if (!receivedSignature) return false;
+
+  const secret = process.env.SECRET;
+  if (!secret) throw new Error("SECRET not set");
+
+  const expectedSignature = crypto
+    .createHmac("sha256", secret)
+    .update(req.rawBody)  // use captured raw body
+    .digest("hex");
+
+  logger.info({ expectedSignature, receivedSignature }, "Verifying signature");
+  return expectedSignature === receivedSignature;
 }
 
-// Helper: send message with retry
-async function sendLineMessage(payload, retries = 3, delay = 2000) {
-  for (let i = 0; i <= retries; i++) {
-    try {
-      const res = await fetch("https://api.line.me/v2/bot/message/push", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${LINE_TOKEN}`
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`LINE API error: ${res.status} ${text}`);
-      }
-
-      logger.info("LINE message sent successfully");
-      return true;
-    } catch (err) {
-      logger.error({ attempt: i + 1, err: err.message }, "LINE send failed");
-      if (i < retries) {
-        logger.warn(`Retrying in ${delay}ms...`);
-        await new Promise(r => setTimeout(r, delay));
-      } else {
-        logger.error("All retries failed.");
-        return false;
-      }
-    }
+function verifySonarWebhook(req, res, next) {
+  if (!isValidSignature(req)) {
+    logger.warn("Invalid signature");
+    return res.status(401).send("Unauthorized: Invalid signature");
   }
+  next();
 }
 
 // Webhook endpoint
-app.post("/sonar-line", verifyJwt, async (req, res) => {
+app.post("/sonar-line", verifySonarWebhook, async (req, res) => {
   try {
-    const jwtPayload = req.jwtPayload;
-    const data = req.body;
-
-    if (!jwtPayload || jwtPayload.url !== process.env.SONARQUBE_URL) {
-      logger.warn({ jwtPayload }, "Forbidden request: JWT URL mismatch");
-      return res.status(403).send("Forbidden");
-    }
+    const data = req.rawBody ? JSON.parse(req.rawBody) : req.body;
 
     // Prepare metrics section with icons
     const metrics = (data.qualityGate?.conditions || [])
-      .map(c => {
+      .map((c) => {
         let icon = "⚪"; // default NO_VALUE
         if (c.status === "OK") icon = "✅";
         else if (c.status === "ERROR") icon = "❌";
@@ -100,15 +81,19 @@ app.post("/sonar-line", verifyJwt, async (req, res) => {
       messages: [
         {
           type: "text",
-          text: `🚀 *SonarQube Analysis Result*\n\n` +
+          text:
+            `🚀 *SonarQube Analysis Result*\n\n` +
             `📁 Project: ${data.project?.name || "Unknown"}\n` +
             `🌿 Branch: ${data.branch?.name || "Unknown"}\n` +
-            `${data.status === "SUCCESS" ? "✅" : "❌"} Analysis Status: ${data.status}\n` +
-            `${data.qualityGate?.status === "OK" ? "🟢" : "🔴"} Quality Gate: ${data.qualityGate?.status}\n\n` +
+            `${data.status === "SUCCESS" ? "✅" : "❌"} Analysis Status: ${data.status
+            }\n` +
+            `${data.qualityGate?.status === "OK" ? "🟢" : "🔴"} Quality Gate: ${data.qualityGate?.status
+            }\n\n` +
             `📊 Metrics:\n${metrics}\n\n` +
-            `🔗 Dashboard: ${process.env.SONARQUBE_URL || "N/A"}/dashboard?id=${data.project?.key || ""}`
-        }
-      ]
+            `🔗 Dashboard: ${process.env.SONARQUBE_URL || "N/A"}/dashboard?id=${data.project?.key || ""
+            }`,
+        },
+      ],
     };
 
     const success = await sendLineMessage(lineMessage);
@@ -131,3 +116,36 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   logger.info(`SonarQube → LINE relay running on port ${PORT}`);
 });
+
+// Helper: send message with retry
+async function sendLineMessage(payload, retries = 3, delay = 2000) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch("https://api.line.me/v2/bot/message/push", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${LINE_TOKEN}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`LINE API error: ${res.status} ${text}`);
+      }
+
+      logger.info("LINE message sent successfully");
+      return true;
+    } catch (err) {
+      logger.error({ attempt: i + 1, err: err.message }, "LINE send failed");
+      if (i < retries) {
+        logger.warn(`Retrying in ${delay}ms...`);
+        await new Promise((r) => setTimeout(r, delay));
+      } else {
+        logger.error("All retries failed.");
+        return false;
+      }
+    }
+  }
+}

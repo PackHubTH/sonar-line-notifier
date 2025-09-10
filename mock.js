@@ -64,7 +64,10 @@ async function testRelay() {
   try {
     const res = await fetch(RELAY_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        // "Content-Type": "application/json",
+        "X-Sonar-Webhook-HMAC-SHA256": "26a35c34848082f8ff74edb838211704f2b12407803097b203af2ddfd017287b"
+      },
       body: JSON.stringify(mockPayload)
     });
     const text = await res.text();
