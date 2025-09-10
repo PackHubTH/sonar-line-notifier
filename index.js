@@ -78,7 +78,7 @@ app.post("/sonar-line", async (req, res) => {
             `${data.status === "SUCCESS" ? "✅" : "❌"} Analysis Status: ${data.status}\n` +
             `${data.qualityGate?.status === "OK" ? "🟢" : "🔴"} Quality Gate: ${data.qualityGate?.status}\n\n` +
             `📊 Metrics:\n${metrics}\n\n` +
-            `🔗 Dashboard: ${data.project?.url || "N/A"}`
+            `🔗 Dashboard: ${process.env.SONARQUBE_URL || "N/A"}/dashboard?id=${data.project?.key || ""}`
         }
       ]
     };
