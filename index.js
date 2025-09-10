@@ -1,4 +1,3 @@
-import crypto from "crypto";
 import dotenv from "dotenv";
 import express from "express";
 import fetch from "node-fetch";
@@ -8,19 +7,6 @@ dotenv.config();
 
 const app = express();
 
-app.use((req, res, next) => {
-  let data = [];
-  req.on("data", chunk => data.push(chunk));
-  req.on("end", () => {
-    req.rawBody = Buffer.concat(data);
-    try {
-      req.body = JSON.parse(req.rawBody.toString("utf8"));
-    } catch {
-      req.body = {};
-    }
-    next();
-  });
-});
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -29,32 +15,8 @@ const LINE_USER_ID = process.env.LINE_USER_ID;
 
 const logger = pino();
 
-function isValidSignature(req) {
-  const receivedSignature = req.headers["x-sonar-webhook-hmac-sha256"];
-  if (!receivedSignature) return false;
-
-  const secret = process.env.SECRET;
-  if (!secret) throw new Error("SECRET not set");
-
-  const expectedSignature = crypto
-    .createHmac("sha256", secret)
-    .update(req.rawBody)  // use captured raw body
-    .digest("hex");
-
-  logger.info({ expectedSignature, receivedSignature }, "Verifying signature");
-  return expectedSignature === receivedSignature;
-}
-
-function verifySonarWebhook(req, res, next) {
-  if (!isValidSignature(req)) {
-    logger.warn("Invalid signature");
-    return res.status(401).send("Unauthorized: Invalid signature");
-  }
-  next();
-}
-
 // Webhook endpoint
-app.post("/sonar-line", verifySonarWebhook, async (req, res) => {
+app.post("/sonar-line", async (req, res) => {
   try {
     const data = req.rawBody ? JSON.parse(req.rawBody) : req.body;
 
