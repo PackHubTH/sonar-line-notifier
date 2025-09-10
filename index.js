@@ -92,6 +92,10 @@ app.post("/sonar-line", async (req, res) => {
   }
 });
 
+app.get("/", (req, res) => {
+  res.send("SonarQube → LINE relay is running.");
+});
+
 app.listen(PORT, () => {
   console.log(`SonarQube → LINE relay running on port ${PORT}`);
 });
