@@ -1,6 +1,8 @@
 import dotenv from "dotenv";
 import express from "express";
 import fetch from "node-fetch";
+import jwt from "jsonwebtoken";
+import pino from "pino";
 
 dotenv.config();
 
@@ -10,6 +12,26 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const LINE_TOKEN = process.env.LINE_TOKEN;
 const LINE_USER_ID = process.env.LINE_USER_ID;
+const SECRET = process.env.JWT_SECRET || "";
+
+const logger = pino()
+
+// Middleware to verify JWT
+function verifyJwt(req, res, next) {
+  const token = req.headers["x-sonar-webhook-hmac-sha256"];
+  if (!token) {
+    logger.warn("Unauthorized: No token provided");
+    return res.status(401).send("Unauthorized: No token provided");
+  }
+  try {
+    const decoded = jwt.verify(token, SECRET);
+    req.jwtPayload = decoded;
+    next();
+  } catch (err) {
+    logger.warn("Unauthorized: " + err.message);
+    return res.status(401).send("Unauthorized: " + err.message);
+  }
+}
 
 // Helper: send message with retry
 async function sendLineMessage(payload, retries = 3, delay = 2000) {
@@ -29,15 +51,15 @@ async function sendLineMessage(payload, retries = 3, delay = 2000) {
         throw new Error(`LINE API error: ${res.status} ${text}`);
       }
 
-      console.log("LINE message sent successfully.");
+      logger.info("LINE message sent successfully");
       return true;
     } catch (err) {
-      console.error(`Attempt ${i + 1} failed:`, err.message);
+      logger.error({ attempt: i + 1, err: err.message }, "LINE send failed");
       if (i < retries) {
-        console.log(`Retrying in ${delay}ms...`);
+        logger.warn(`Retrying in ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
       } else {
-        console.error("All retries failed.");
+        logger.error("All retries failed.");
         return false;
       }
     }
@@ -45,9 +67,15 @@ async function sendLineMessage(payload, retries = 3, delay = 2000) {
 }
 
 // Webhook endpoint
-app.post("/sonar-line", async (req, res) => {
+app.post("/sonar-line", verifyJwt, async (req, res) => {
   try {
+    const jwtPayload = req.jwtPayload;
     const data = req.body;
+
+    if (!jwtPayload || jwtPayload.url !== process.env.SONARQUBE_URL) {
+      logger.warn({ jwtPayload }, "Forbidden request: JWT URL mismatch");
+      return res.status(403).send("Forbidden");
+    }
 
     // Prepare metrics section with icons
     const metrics = (data.qualityGate?.conditions || [])
@@ -83,11 +111,15 @@ app.post("/sonar-line", async (req, res) => {
       ]
     };
 
-
     const success = await sendLineMessage(lineMessage);
+    logger.info(
+      { project: data.project?.name, branch: data.branch?.name, success },
+      "Webhook processed"
+    );
+
     res.status(success ? 200 : 500).send(success ? "OK" : "Failed");
   } catch (err) {
-    console.error(err);
+    logger.error({ err }, "Internal server error in /sonar-line");
     res.status(500).send("Internal Server Error");
   }
 });
@@ -97,5 +129,5 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`SonarQube → LINE relay running on port ${PORT}`);
+  logger.info(`SonarQube → LINE relay running on port ${PORT}`);
 });
